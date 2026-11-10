@@ -41,7 +41,7 @@ class UsbAudioSource(private val context: Context) : AudioSource() {
             44_100 in supportedRates -> 44_100
             else -> supportedRates.minBy { kotlin.math.abs(it - defaultRate) }
         }
-        val channels = input?.channelCounts.orEmpty()
+        val channels = input?.channelCounts ?: intArrayOf()
         val stereo = if (channels.isEmpty()) defaultStereo else defaultStereo && channels.any { it >= 2 }
         return UsbAudioConfig(chosenRate, stereo)
     }
