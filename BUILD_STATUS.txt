@@ -1,0 +1,21 @@
+TVSHERE 1.1.0-rc1 — SOURCE PACKAGE STATUS
+
+This archive is a source release candidate intended for import into the user's Git clone with TVSHERE_PUSH_TERMUX.sh.
+
+Checks performed in the packaging environment:
+- Release source-structure verification.
+- Shell syntax checks for the Termux upload and verification scripts.
+- End-to-end Termux upload-script test against a disposable local bare Git remote (no GitHub changes).
+- AndroidManifest.xml XML parsing.
+- Standalone Kotlin compilation of Models.kt, AudioMixer.kt, and AdaptiveBitrateController.kt.
+
+Not performed in the packaging environment:
+- Full Android/Compose/Android SDK Gradle build: Gradle and Android SDK are not installed here.
+- Physical Android installation or execution.
+- HDMI/UVC capture-card preview and disconnect/reconnect testing.
+- USB Audio Class routing test on the target phone/capture card.
+- End-to-end RTMP/RTMPS platform acceptance test using the user's own ingest URL and stream key.
+
+GitHub Actions is configured to run unit tests and assemble the debug APK after the source is pushed. A green CI build is required before APK installation. The physical tests above are still required before calling the app production-ready.
+
+No GitHub commit or push was made by the packaging environment.
