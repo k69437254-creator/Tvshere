@@ -6,7 +6,7 @@ plugins {
 
 android {
     namespace = "com.hassouni.tv"
-    compileSdk = 34
+    compileSdk = 35
 
     defaultConfig {
         applicationId = "com.hassouni.tv"
