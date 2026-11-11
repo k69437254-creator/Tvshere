@@ -25,7 +25,7 @@ import com.hassouni.tv.notifications.AppNotifications
 import com.pedro.common.ConnectChecker
 import com.pedro.encoder.TimestampMode
 import com.pedro.encoder.input.gl.render.filters.`object`.ImageFilterRender
-import com.pedro.encoder.input.gl.render.filters.`object`.CropFilterRender
+import com.pedro.encoder.input.gl.render.filters.CropFilterRender
 import com.pedro.library.rtmp.RtmpStream
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.flow.MutableStateFlow
