@@ -6,6 +6,13 @@ enum class Platform(val label: String, val hint: String) {
     TIKTOK("TikTok Live", "الصق رابط الخادم الذي وفره TikTok لهذه الجلسة"),
     CUSTOM("خادم RTMP مخصص", "rtmp://server/app")
 }
+enum class PreviewShape(val label: String, val ratio: Float?) {
+    AUTO("تلقائي حسب المصدر", null),
+    LANDSCAPE_16_9("أفقي 16:9", 16f / 9f),
+    PORTRAIT_9_16("عمودي 9:16", 9f / 16f),
+    SQUARE_1_1("مربع 1:1", 1f)
+}
+
 enum class Res(val label: String, val w: Int, val h: Int, val maxKbps: Int) {
     P1080("1080p", 1920, 1080, 6000), P720("720p", 1280, 720, 3500),
     P480("480p", 854, 480, 1500), P360("360p", 640, 360, 800), P240("240p", 426, 240, 400)
@@ -26,4 +33,12 @@ data class LiveStats(
     val bitrateKbps: Int = 0, val dropped: Int = 0, val cpu: Int = 0, val ramMb: Int = 0,
     val tempC: Float = 0f, val elapsedSec: Long = 0,
     val sentVideoFrames: Long = 0, val sentAudioFrames: Long = 0, val bytesSent: Long = 0
+)
+
+
+/** Scene crop controls, independent from local preview framing. */
+data class SceneSettings(
+    val zoom: Float = 1f,
+    val panX: Float = 0f,
+    val panY: Float = 0f
 )

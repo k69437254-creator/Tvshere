@@ -10,7 +10,6 @@ import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.compose.runtime.CompositionLocalProvider
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.unit.LayoutDirection
 import com.hassouni.tv.ui.AppRoot
@@ -32,13 +31,13 @@ class MainActivity : ComponentActivity() {
                 vm.setCameraPermission(granted)
             }
 
-            LaunchedEffect(Unit) {
-                if (hasCameraPermission()) vm.setCameraPermission(true)
-                else requestCamera.launch(Manifest.permission.CAMERA)
-            }
-
             CompositionLocalProvider(LocalLayoutDirection provides LayoutDirection.Rtl) {
-                HassouniTheme { AppRoot(vm) }
+                HassouniTheme {
+                    AppRoot(vm) {
+                        if (hasCameraPermission()) vm.setCameraPermission(true)
+                        else requestCamera.launch(Manifest.permission.CAMERA)
+                    }
+                }
             }
         }
     }

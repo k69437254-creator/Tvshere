@@ -16,13 +16,16 @@ import com.hassouni.tv.data.AudioSettings
 import com.hassouni.tv.data.LiveStats
 import com.hassouni.tv.data.OverlayState
 import com.hassouni.tv.data.QualitySettings
+import com.hassouni.tv.data.SceneSettings
 import com.hassouni.tv.data.Res
 import com.hassouni.tv.data.SignalState
 import com.hassouni.tv.data.StreamTarget
 import com.hassouni.tv.overlay.OverlayRenderer
+import com.hassouni.tv.notifications.AppNotifications
 import com.pedro.common.ConnectChecker
 import com.pedro.encoder.TimestampMode
 import com.pedro.encoder.input.gl.render.filters.`object`.ImageFilterRender
+import com.pedro.encoder.input.gl.render.filters.`object`.CropFilterRender
 import com.pedro.library.rtmp.RtmpStream
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -34,10 +37,15 @@ class BroadcastController(context: Context, val capture: CaptureEngine) : Connec
     private var stream: RtmpStream? = null
     private var audioSource: UsbAudioSource? = null
     private var overlayRenderer: OverlayRenderer? = null
+    private var sceneFilter: CropFilterRender? = null
+    private var selectedScene = SceneSettings()
     private var overlayFilter: ImageFilterRender? = null
     private var previewView: SurfaceView? = null
     private var previewHolderCallback: SurfaceHolder.Callback? = null
+    private var previewHolder: SurfaceHolder? = null
     private var preparedQuality: QualitySettings? = null
+    private var stopRequestedByUser = false
+    private var lastNotifiedError: String? = null
     private var selectedOverlay = OverlayState()
     private val preparing = AtomicBoolean(false)
     private var startedAtMs = 0L
@@ -87,18 +95,60 @@ class BroadcastController(context: Context, val capture: CaptureEngine) : Connec
         if (previewView !== view) {
             val oldView = previewView
             val oldCallback = previewHolderCallback
-            if (oldView != null && oldCallback != null) runCatching { oldView.holder.removeCallback(oldCallback) }
-            previewView = view
-            val callback = object : SurfaceHolder.Callback {
-                override fun surfaceCreated(holder: SurfaceHolder) = prepareAndStartPreview()
-                override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) = prepareAndStartPreview()
-                override fun surfaceDestroyed(holder: SurfaceHolder) {
-                    if (stream?.isOnPreview == true) runCatching { stream?.stopPreview(false) }
+
+            // Detach the previous GL preview surface before replacing its view.
+            if (stream?.isOnPreview == true) {
+                try {
+                    stream?.stopPreview(false)
+                } catch (error: Exception) {
+                    reportFailure("تعذر فصل سطح المعاينة السابق: ${error.message ?: "خطأ غير معروف"}")
+                    return
                 }
             }
+            previewHolder = null
+
+            if (oldView != null && oldCallback != null) {
+                runCatching { oldView.holder.removeCallback(oldCallback) }
+            }
+
+            previewView = view
+            val callback = object : SurfaceHolder.Callback {
+                override fun surfaceCreated(holder: SurfaceHolder) {
+                    if (previewView?.holder === holder) {
+                        prepareAndStartPreview()
+                    }
+                }
+
+                override fun surfaceChanged(
+                    holder: SurfaceHolder,
+                    format: Int,
+                    width: Int,
+                    height: Int
+                ) {
+                    if (previewView?.holder === holder) {
+                        prepareAndStartPreview()
+                    }
+                }
+
+                override fun surfaceDestroyed(holder: SurfaceHolder) {
+                    // Ignore destruction callbacks belonging to an obsolete view.
+                    if (previewView?.holder !== holder) return
+
+                    if (previewHolder === holder && stream?.isOnPreview == true) {
+                        try {
+                            stream?.stopPreview(false)
+                            previewHolder = null
+                        } catch (error: Exception) {
+                            reportFailure("تعذر فصل سطح المعاينة عند إغلاقه: ${error.message ?: "خطأ غير معروف"}")
+                        }
+                    }
+                }
+            }
+
             previewHolderCallback = callback
             view.holder.addCallback(callback)
         }
+
         prepareAndStartPreview()
     }
 
@@ -111,14 +161,38 @@ class BroadcastController(context: Context, val capture: CaptureEngine) : Connec
     private fun startPreviewOnCurrentSurface() {
         val view = previewView ?: return
         val current = stream ?: return
-        val surface = view.holder.surface
+        val holder = view.holder
+        val surface = holder.surface
+
         if (!surface.isValid || view.width <= 0 || view.height <= 0) return
+
         if (current.isOnPreview) {
-            runCatching { current.getGlInterface().setPreviewResolution(view.width, view.height) }
-            return
+            if (previewHolder === holder) {
+                try {
+                    current.getGlInterface().setPreviewResolution(view.width, view.height)
+                } catch (error: Exception) {
+                    reportFailure("تعذر تحديث أبعاد المعاينة: ${error.message ?: "خطأ غير معروف"}")
+                }
+                return
+            }
+
+            // The pipeline is previewing another holder; detach it before rebinding.
+            try {
+                current.stopPreview(false)
+            } catch (error: Exception) {
+                reportFailure("تعذر فصل سطح المعاينة السابق قبل إعادة الربط: ${error.message ?: "خطأ غير معروف"}")
+                return
+            }
+            previewHolder = null
         }
-        runCatching { current.startPreview(surface, view.width, view.height) }
-            .onFailure { reportFailure("تعذر بدء المعاينة: ${it.message ?: "خطأ غير معروف"}") }
+
+        runCatching {
+            current.startPreview(surface, view.width, view.height)
+            previewHolder = holder
+        }.onFailure {
+            previewHolder = null
+            reportFailure("تعذر بدء المعاينة: ${it.message ?: "خطأ غير معروف"}")
+        }
     }
 
     fun retryCapture() {
@@ -126,14 +200,7 @@ class BroadcastController(context: Context, val capture: CaptureEngine) : Connec
             reportFailure("أوقف البث قبل إعادة تهيئة كارت الالتقاط.")
             return
         }
-        runCatching { stream?.release() }
-        stream = null
-        preparedQuality = null
-        audioSource = null
-        overlayFilter = null
-        overlayRenderer?.release()
-        overlayRenderer = null
-        loadedLogoUri = null
+        cleanupPreparedResources()
         capture.setState(SignalState.DISCONNECTED)
         capture.clearError()
         prepareAndStartPreview()
@@ -141,6 +208,48 @@ class BroadcastController(context: Context, val capture: CaptureEngine) : Connec
 
     fun setAudio(settings: AudioSettings) {
         audioSource?.settings = settings
+    }
+
+    /**
+     * Replace the crop filter through RootEncoder's GL action queue.
+     * Never mutate a live CropFilterRender matrix directly from the UI thread.
+     */
+    fun setScene(settings: SceneSettings) {
+        selectedScene = settings.copy(
+            zoom = settings.zoom.coerceIn(1f, 3f),
+            panX = settings.panX.coerceIn(-1f, 1f),
+            panY = settings.panY.coerceIn(-1f, 1f)
+        )
+
+        val current = stream ?: return
+        if (sceneFilter == null) return
+
+        val next = createSceneFilter(selectedScene)
+
+        runCatching {
+            current.getGlInterface().setFilter(0, next)
+            sceneFilter = next
+        }.onFailure {
+            reportFailure("تعذر تحديث قص المشهد: ${it.message ?: "خطأ رسومي"}")
+        }
+    }
+
+    private fun createSceneFilter(settings: SceneSettings): CropFilterRender {
+        val zoom = settings.zoom.coerceIn(1f, 3f)
+        val cropWidth = 100f / zoom
+        val cropHeight = 100f / zoom
+
+        val travelX = 100f - cropWidth
+        val travelY = 100f - cropHeight
+
+        val offsetX =
+            (travelX / 2f) * (1f + settings.panX.coerceIn(-1f, 1f))
+        val offsetY =
+            (travelY / 2f) * (1f + settings.panY.coerceIn(-1f, 1f))
+
+        return CropFilterRender().apply {
+            setCropArea(offsetX, offsetY, cropWidth, cropHeight)
+        }
     }
 
     fun setOverlay(state: OverlayState) {
@@ -192,6 +301,7 @@ class BroadcastController(context: Context, val capture: CaptureEngine) : Connec
             reportFailure("أدخل مفتاح البث الذي وفرته منصة البث.")
             return
         }
+        stopRequestedByUser = false
         if (!ensurePrepared(quality)) return
         setAudio(audio)
         setOverlay(overlay)
@@ -243,6 +353,7 @@ class BroadcastController(context: Context, val capture: CaptureEngine) : Connec
     }
 
     fun stop() {
+        stopRequestedByUser = true
         val current = stream
         if (current?.isStreaming == true) runCatching { current.stopStream() }
         _streaming.value = false
@@ -284,6 +395,25 @@ class BroadcastController(context: Context, val capture: CaptureEngine) : Connec
         }
     }
 
+    private fun cleanupPreparedResources() {
+        if (_streaming.value) return
+
+        val oldStream = stream
+        val oldRenderer = overlayRenderer
+
+        stream = null
+        audioSource = null
+        previewHolder = null
+        preparedQuality = null
+        overlayFilter = null
+        sceneFilter = null
+        overlayRenderer = null
+        loadedLogoUri = null
+
+        runCatching { oldStream?.release() }
+        runCatching { oldRenderer?.release() }
+    }
+
     private fun ensurePrepared(quality: QualitySettings): Boolean {
         if (preparing.get()) return false
         val chosenRes = if (quality.autoRes) Res.P720 else quality.res
@@ -295,13 +425,7 @@ class BroadcastController(context: Context, val capture: CaptureEngine) : Connec
         }
         if (!preparing.compareAndSet(false, true)) return false
         try {
-            stream?.release()
-            stream = null
-            audioSource = null
-            overlayFilter = null
-            overlayRenderer?.release()
-            overlayRenderer = null
-            loadedLogoUri = null
+            cleanupPreparedResources()
 
             val video = UvcVideoSource(appContext, capture)
             val audio = UsbAudioSource(appContext)
@@ -311,6 +435,7 @@ class BroadcastController(context: Context, val capture: CaptureEngine) : Connec
             audio.onAvailability = { available, message ->
                 _audioAvailable.value = available
                 _audioMessage.value = message ?: if (available) "صوت USB متصل" else "صوت USB غير متاح"
+                AppNotifications.show(appContext, if (available) "مدخل صوت USB متصل" else "تنبيه مدخل صوت USB", _audioMessage.value, 4301, "tvshere_audio", "تنبيهات الصوت")
             }
             stream = RtmpStream(appContext, this, video, audio).apply {
                 setTimestampMode(TimestampMode.CLOCK, TimestampMode.BUFFER)
@@ -325,12 +450,13 @@ class BroadcastController(context: Context, val capture: CaptureEngine) : Connec
                 quality.fps.coerceIn(15, 60), 2, 0
             ) && stream!!.prepareAudio(audioConfig.sampleRate, audioConfig.stereo, 128_000)
             if (!prepared) {
-                stream?.release()
-                stream = null
+                cleanupPreparedResources()
                 reportFailure("لم يستطع الهاتف تهيئة مرمّز الفيديو/الصوت بهذه الدقة. جرّب 720p أو 480p.")
                 return false
             }
 
+            sceneFilter = createSceneFilter(selectedScene)
+            stream!!.getGlInterface().addFilter(0, sceneFilter!!)
             overlayRenderer = OverlayRenderer(chosenRes.w, chosenRes.h)
             loadLogoIfNeeded(selectedOverlay)
             overlayRenderer!!.render(selectedOverlay)
@@ -346,8 +472,7 @@ class BroadcastController(context: Context, val capture: CaptureEngine) : Connec
             startPreviewOnCurrentSurface()
             return true
         } catch (e: Exception) {
-            stream?.release()
-            stream = null
+            cleanupPreparedResources()
             reportFailure("تعذر إعداد محرك البث: ${e.message ?: e.javaClass.simpleName}")
             return false
         } finally {
@@ -361,24 +486,20 @@ class BroadcastController(context: Context, val capture: CaptureEngine) : Connec
         val callback = previewHolderCallback
         if (oldView != null && callback != null) runCatching { oldView.holder.removeCallback(callback) }
         previewHolderCallback = null
-        runCatching { stream?.release() }
-        stream = null
-        preparedQuality = null
-        audioSource = null
-        overlayFilter = null
-        overlayRenderer?.release()
-        overlayRenderer = null
+        cleanupPreparedResources()
         previewView = null
-        loadedLogoUri = null
     }
 
     private fun reportFailure(message: String) {
         _lastError.value = message
         _status.value = message
+        if (lastNotifiedError != message) AppNotifications.show(appContext, "تنبيه Tvshere", message, 4203, "tvshere_stream", "تنبيهات البث")
+        lastNotifiedError = message
     }
 
     override fun onConnectionStarted(url: String) {
         _status.value = "بدأ الاتصال بخادم RTMP"
+        AppNotifications.show(appContext, "جارٍ بدء البث", "بدأ Tvshere الاتصال بوجهة RTMP.", 4200, "tvshere_stream", "تنبيهات البث")
     }
 
     override fun onConnectionSuccess() {
@@ -386,6 +507,8 @@ class BroadcastController(context: Context, val capture: CaptureEngine) : Connec
         _connected.value = true
         _status.value = "البث متصل ويُرسل الفيديو"
         _lastError.value = null
+        lastNotifiedError = null
+        AppNotifications.show(appContext, "البث متصل", "تم الاتصال بخادم البث ويجري إرسال الفيديو.", 4201, "tvshere_stream", "تنبيهات البث")
     }
 
     override fun onNewBitrate(bitrate: Long) {
@@ -400,10 +523,18 @@ class BroadcastController(context: Context, val capture: CaptureEngine) : Connec
     }
 
     override fun onConnectionFailed(reason: String) {
+        if (stopRequestedByUser) {
+            _streaming.value = false
+            _connected.value = false
+            appContext.stopService(Intent(appContext, StreamService::class.java))
+            return
+        }
+
         val retried = runCatching { stream?.getStreamClient()?.reTry(3000, reason, null) == true }.getOrDefault(false)
         if (retried) {
             _connected.value = false
             _status.value = "انقطع الاتصال مؤقتًا — تجري إعادة المحاولة"
+            AppNotifications.show(appContext, "إعادة الاتصال بالبث", "انقطع الاتصال مؤقتًا؛ يحاول Tvshere الاتصال مجددًا.", 4204, "tvshere_stream", "تنبيهات البث")
         }
         else {
             runCatching { stream?.stopStream() }
@@ -415,10 +546,12 @@ class BroadcastController(context: Context, val capture: CaptureEngine) : Connec
     }
 
     override fun onDisconnect() {
+        val wasConnected = _connected.value
         _streaming.value = false
         _connected.value = false
         startedAtMs = 0L
         if (_status.value == "البث متصل ويُرسل الفيديو") _status.value = "انقطع اتصال البث"
+        if (wasConnected && !stopRequestedByUser) AppNotifications.show(appContext, "انقطع البث", "فُقد اتصال خادم البث. افتح Tvshere لمراجعة الحالة.", 4202, "tvshere_stream", "تنبيهات البث")
         appContext.stopService(Intent(appContext, StreamService::class.java))
     }
 
